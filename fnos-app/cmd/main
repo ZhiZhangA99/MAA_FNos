@@ -1,0 +1,670 @@
+#!/bin/bash
+# MAA on 飞牛 —— 纯套壳：用 Docker 拉起 MAA Web 控制台
+# 依赖：镜像 maa-fnos:local（由离线安装包内置导入）
+# 说明：只做进程/容器生命周期管理
+
+IMAGE="maa-fnos:local"
+CONTAINER="maa-fnos"
+# 历史容器名：maa-web-test（v1.0.3 之前）、maa-web（v1.0.3–1.0.6），首次 start 时清理，避免占用宿主机端口
+LEGACY_CONTAINERS="maa-web maa-web-test"
+# 走飞牛统一网关：应用服务监听 unix socket，不再对外映射端口。
+# 网关按 app/ui/config 里的 gatewaySocket 找过来，鉴权由网关负责。
+#
+# socket 不直接落在 TRIM_APPDEST 里，而是放一个只装 socket 的专用目录，
+# 容器只挂这一个目录（见 start_process 的 -v）。原因：
+# TRIM_APPDEST 下还有 redroid_status_proxy.py，而本脚本随后会以 package 用户
+# 在宿主上直接执行它（package 属于 docker 组）—— 要是把整个 TRIM_APPDEST
+# 读写挂进以 root 运行的容器，容器里拿到代码执行就能改写那个文件，
+# 等代理下次重启就等于接管了宿主机。
+# 网关找的仍是 ${TRIM_APPDEST}/app.sock，这里用软链引到专用目录；
+# 网关注册的路径 /var/apps/<app>/target/app.sock 本身就是软链，穿透没问题。
+GATEWAY_DIR="${TRIM_PKGVAR}/gateway"
+GATEWAY_SOCKET="${TRIM_APPDEST}/app.sock"
+
+# 网关改造（1.0.9）之前的容器只监听宿主 18000 端口、没有 unix socket。
+# 升级是先停旧容器再换新的，这段窗口里 socket 还不存在 —— 只认 socket 的话，
+# 优雅停机会被跳过、进行中的任务链被硬切。所以探活和停机都要能回退到它。
+# 新容器不再映射端口，回退分支自然拿不到东西，不影响正常路径。
+LEGACY_TCP_PORT="18000"
+
+CONTAINER_PORT="8000"      # 仅调试用（走 TCP 时）
+
+# 健康探活：容器在 ≠ 服务在。
+# 容器跑着但服务卡死/端口不通时，应用中心应当看到"异常"，而不是一直显示"运行中"。
+HEALTH_CHECK_PATH="/api/status"   # 探活走 GATEWAY_SOCKET，不再走端口
+HEALTH_TIMEOUT="2"    # 探活超时（秒）
+HEALTH_GRACE="30"     # 容器起来后的宽限秒数；期内不探活（服务还没 listen，探了必然误报）
+HEALTH_WARN_THROTTLE="60"  # 探活失败的 WARN 日志节流窗口（秒）
+HEALTH_WARN_STAMP="${TRIM_PKGVAR}/health-warn.ts"
+
+# 优雅停机：停容器前先请应用停掉进行中的任务链，避免硬切断
+GRACEFUL_STOP_TIMEOUT="60"   # 等待任务链释放的最长秒数
+DOCKER_STOP_TIMEOUT="20"     # docker stop 的宽限期（秒）
+
+# redroid 状态查询代理（宿主机侧）
+REDROID_PROXY_HOST="172.17.0.1"
+REDROID_PROXY_PORT="18001"
+REDROID_PROXY_PY="${TRIM_APPDEST}/redroid_status_proxy.py"
+REDROID_PROXY_LOG="${TRIM_PKGVAR}/redroid-proxy.log"
+# 代理脚本的版本号，必须与 redroid_status_proxy.py 里的 PROXY_VERSION 一致。
+# 对不上说明 18001 上跑的还是上一版进程，要换掉（否则升级静默失效）。
+REDROID_PROXY_VERSION="1.1"
+# redroid 容器对外映射的 ADB 端口，注入给代理用于按端口反查真实容器名。
+REDROID_PORT="5555"
+
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+
+# 应用数据目录（持久化：任务配置/日志/profile）
+DATA_DIR="${TRIM_PKGVAR}/maa-data"
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"
+}
+
+# 把错误暴露到飞牛应用中心界面
+write_user_error() {
+    echo "$1" > "${TRIM_TEMP_LOGFILE}"
+    log_msg "ERROR: $1"
+}
+
+# 检查 docker 是否可用
+check_docker() {
+    if ! command -v docker >/dev/null 2>&1; then
+        write_user_error "未找到 docker，请在应用中心安装 Docker 后重试。"
+        return 1
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        write_user_error "Docker 服务未运行，请先启动 Docker。"
+        return 1
+    fi
+    return 0
+}
+
+# 清掉历史旧容器（maa-web-test / maa-web）
+# 必须做：新名字的容器要绑同一个宿主机端口 18000，
+# 旧容器不删掉会占着端口，导致新容器起不来。
+cleanup_legacy_container() {
+    local c found
+    for c in ${LEGACY_CONTAINERS}; do
+        found="$(docker ps -a --filter "name=^${c}$" --format '{{.Names}}' 2>/dev/null)"
+        [ -n "${found}" ] || continue
+        log_msg "Found legacy container ${c}, removing ..."
+        docker stop "${c}" >> "${LOG_FILE}" 2>&1 || true
+        docker rm -f "${c}" >> "${LOG_FILE}" 2>&1 || true
+        log_msg "Legacy container ${c} removed."
+    done
+    return 0
+}
+
+# ---- 镜像指纹（期望值必须来自包内，不能来自运行时残留）----
+# 只比对「同名镜像是否存在」是不够的：升级后旧镜像仍在，新包里的镜像永远不会被 load。
+# 但光有指纹文件也不够 —— 它若被卸载清掉，比对就退化成了「存在即可用」，问题原样复现。
+# 所以：期望值一律从包内的镜像包推导，缺失就现场重新推导，不留任何静默退化分支。
+IMAGE_ID_FILE="${TRIM_APPDEST}/maa-image.id"
+IMAGE_TGZ="${TRIM_APPDEST}/maa-image.tar.gz"
+IMAGE_TAR="${TRIM_APPDEST}/maa-image.tar"
+
+# 校验：是否为合法的 sha256 裸摘要（64 位小写十六进制）
+is_sha256_hex() {
+    printf '%s' "$1" | grep -qE '^[0-9a-f]{64}$'
+}
+
+# 从离线镜像包里推导镜像 ID（可能有多枚候选，每行一个 sha256:...，已去重）
+# 原理：
+#   - 经典 docker save：manifest.json 里的 Config 指向的摘要即镜像 ID，
+#     可能是裸 hash、<64hex>.json，或路径形式 blobs/sha256/<64hex>。
+#   - OCI / containerd 镜像存储（Docker 29）：manifest.json 的 Config 只是 config blob，
+#     真正的镜像 ID 在 index.json 顶层 manifests 描述符的 digest。两者都作为候选。
+# 只从包内推导；缺 index.json 的经典包照常处理；不扫描 index 之外的其他 blob。
+# manifest.json 位于 tar 开头，实测约 2 秒。
+derive_image_id() {
+    local src="$1" manifest config_raw config index top d candidates=""
+    [ -f "${src}" ] || return 1
+    case "${src}" in
+        *.gz) manifest="$(gunzip -c "${src}" 2>/dev/null | tar -xO manifest.json 2>/dev/null)" ;;
+        *)    manifest="$(tar -xO manifest.json -f "${src}" 2>/dev/null)" ;;
+    esac
+    [ -n "${manifest}" ] || return 1
+
+    # 经典候选：manifest.json 的 Config；剥离路径与 .json 后缀，必须正好 64 位十六进制
+    config_raw="$(printf '%s' "${manifest}" | tr -d '\n' \
+        | grep -oE '"Config"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 \
+        | sed 's/.*"Config"[[:space:]]*:[[:space:]]*"//; s/"$//')"
+    if [ -n "${config_raw}" ]; then
+        config="$(basename "${config_raw}")"
+        config="${config%.json}"
+        if is_sha256_hex "${config}"; then
+            candidates="${candidates}sha256:${config}
+"
+        fi
+
+        # 只有 Config 呈路径形式（OCI 布局 blobs/sha256/...）时才去读 index.json，
+        # 免得经典包为找不存在的 index 白扫一遍整包。
+        case "${config_raw}" in
+            */*)
+                case "${src}" in
+                    *.gz) index="$(gunzip -c "${src}" 2>/dev/null | tar -xO index.json 2>/dev/null)" ;;
+                    *)    index="$(tar -xO index.json -f "${src}" 2>/dev/null)" ;;
+                esac
+                if [ -n "${index}" ]; then
+                    # 仅取顶层 manifests 数组里的 digest（单镜像单平台），不动其他 blob
+                    top="$(printf '%s' "${index}" | tr -d '\n' \
+                        | sed 's/.*"manifests"[[:space:]]*:[[:space:]]*\[//; s/\].*//')"
+                    for d in $(printf '%s' "${top}" \
+                            | grep -oE '"digest"[[:space:]]*:[[:space:]]*"sha256:[0-9a-f]{64}"' \
+                            | sed 's/.*"sha256:/sha256:/; s/"$//'); do
+                        candidates="${candidates}${d}
+"
+                    done
+                fi
+                ;;
+        esac
+    fi
+
+    [ -n "${candidates}" ] || return 1
+    printf '%s' "${candidates}" | awk 'NF && !seen[$0]++'
+}
+
+# 从包内镜像包推导期望指纹并落盘（全部合法候选，每行一个）
+write_expected_id() {
+    local ids
+    ids="$(derive_image_id "${IMAGE_TGZ}")" || ids="$(derive_image_id "${IMAGE_TAR}")" || ids=""
+    if [ -z "${ids}" ]; then
+        return 1
+    fi
+    printf '%s\n' "${ids}" > "${IMAGE_ID_FILE}" 2>/dev/null || true
+    log_msg "Expected image id(s) from package: $(printf '%s' "${ids}" | tr '\n' ' ')"
+    return 0
+}
+
+# 确保期望指纹存在；缺失就现场推导（自愈，用于首次安装或指纹被清掉的情况）
+ensure_expected_id() {
+    [ -s "${IMAGE_ID_FILE}" ] && return 0
+    write_expected_id || {
+        log_msg "WARN: 既没有 ${IMAGE_ID_FILE}，也无法从镜像包推导，只能重新导入。"
+        return 1
+    }
+    return 0
+}
+
+# 给定镜像 ID 是否命中 IMAGE_ID_FILE 中的任一候选（每行一个，兼容旧版单行指纹）
+expected_id_matches() {
+    local current want
+    current="$(printf '%s' "$1" | tr -d '[:space:]')"
+    [ -n "${current}" ] || return 1
+    [ -s "${IMAGE_ID_FILE}" ] || return 1
+    while IFS= read -r want; do
+        want="$(printf '%s' "${want}" | tr -d '[:space:]')"
+        [ -n "${want}" ] || continue
+        # docker 的 .Id 带 sha256: 前缀，指纹文件里也按完整值存，前缀有无都比一遍
+        if [ "${current}" = "${want}" ] || [ "${current#sha256:}" = "${want#sha256:}" ]; then
+            return 0
+        fi
+    done < "${IMAGE_ID_FILE}"
+    return 1
+}
+
+# 镜像是否已就绪：已加载，且 ID 命中包内期望候选
+image_ready() {
+    docker image inspect "${IMAGE}" >/dev/null 2>&1 || return 1
+    ensure_expected_id || return 1
+    local current
+    current="$(docker image inspect --format '{{.Id}}' "${IMAGE}" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "${current}" ] || return 1
+    if expected_id_matches "${current}"; then
+        return 0
+    fi
+    # 指纹文件可能是旧版本写的（只存了 Config 推导出的单一值，Docker 29 下与真实镜像 ID 不符）。
+    # 从包内刷新一次再比；仍不命中才判定需要重新导入。
+    write_expected_id || true
+    if expected_id_matches "${current}"; then
+        log_msg "Image id refreshed from package (${current})."
+        return 0
+    fi
+    log_msg "Image id mismatch (have=${current}) -> will reload."
+    return 1
+}
+
+ensure_image() {
+    if image_ready; then
+        return 0
+    fi
+
+    # 指纹不符时，先移除旧镜像，避免 load 后 tag 被旧镜像占用
+    if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+        log_msg "Removing stale image ${IMAGE} ..."
+        docker rmi -f "${IMAGE}" >> "${LOG_FILE}" 2>&1 || true
+    fi
+
+    # 离线包（gzip 压缩）：app/maa-image.tar.gz
+    if [ -f "${IMAGE_TGZ}" ]; then
+        local tmp_tar="${TRIM_PKGVAR}/maa-image.tar"
+        log_msg "Decompressing ${IMAGE_TGZ} ..."
+        # gunzip 对「压缩流本身完好、只是尾部多带了几个字节」的包会返回 2
+        # （报 trailing garbage），而解出来的 tar 是完整可用的。
+        # 只看返回码会把这样的好包判成坏包 —— 判定改成校验解压产物本身。
+        gunzip -c "${IMAGE_TGZ}" > "${tmp_tar}" 2>> "${LOG_FILE}" || true
+        if [ ! -s "${tmp_tar}" ] || ! tar -tf "${tmp_tar}" manifest.json >/dev/null 2>&1; then
+            rm -f "${tmp_tar}"
+            write_user_error "镜像解压失败，请查看日志 ${LOG_FILE}"
+            return 1
+        fi
+        log_msg "Loading image ..."
+        if docker load -i "${tmp_tar}" >> "${LOG_FILE}" 2>&1; then
+            rm -f "${tmp_tar}"
+            # 导入成功后就地刷新期望指纹，保证与刚装进来的镜像一致
+            write_expected_id || true
+            log_msg "Image loaded."
+            return 0
+        fi
+        rm -f "${tmp_tar}"
+        write_user_error "镜像导入失败，请查看日志 ${LOG_FILE}"
+        return 1
+    fi
+
+    # 兼容未压缩形式
+    if [ -f "${IMAGE_TAR}" ]; then
+        log_msg "Loading image from ${IMAGE_TAR} ..."
+        if docker load -i "${IMAGE_TAR}" >> "${LOG_FILE}" 2>&1; then
+            write_expected_id || true
+            log_msg "Image loaded."
+            return 0
+        fi
+        write_user_error "镜像导入失败，请查看日志 ${LOG_FILE}"
+        return 1
+    fi
+
+    write_user_error "未找到镜像 ${IMAGE}，且离线包不存在。"
+    return 1
+}
+
+# 代理上报的版本号；问不到（老版本没这个端点、或端口上不是我们的代理）返回空串
+proxy_reported_version() {
+    curl -sf --max-time 2 "http://${REDROID_PROXY_HOST}:${REDROID_PROXY_PORT}/version" 2>/dev/null \
+        | tr -d '\n' \
+        | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]*"' \
+        | head -1 \
+        | sed 's/.*:[[:space:]]*"//; s/"$//'
+}
+
+# 端口上有没有东西在应答（任何 HTTP 状态码都算，含 403/404）
+proxy_port_answered() {
+    curl -s --max-time 2 "http://${REDROID_PROXY_HOST}:${REDROID_PROXY_PORT}/inspect?name=__probe__" >/dev/null 2>&1
+}
+
+# 停掉本项目启动的代理进程。
+# 只按本脚本的完整路径精确匹配，宿主机上别的 python 进程一律不碰。
+stop_redroid_proxy() {
+    local pids
+    pids="$(pgrep -f "^python3 ${REDROID_PROXY_PY}$" 2>/dev/null || true)"
+    [ -n "${pids}" ] || return 0
+
+    # shellcheck disable=SC2086
+    kill ${pids} 2>/dev/null || true
+    sleep 1
+
+    pids="$(pgrep -f "^python3 ${REDROID_PROXY_PY}$" 2>/dev/null || true)"
+    if [ -n "${pids}" ]; then
+        # shellcheck disable=SC2086
+        kill -9 ${pids} 2>/dev/null || true
+    fi
+    return 0
+}
+
+# 确保 redroid 状态代理在宿主机侧运行
+# 说明：MAA 的「检查 redroid 容器」功能需要查询宿主机上的容器状态。
+# 这里启动一个只读代理（仅支持 inspect 查询），容器内通过它获取状态，
+# 从而避免把 docker.sock 直接挂进容器（最小权限原则）。
+#
+# 探活为什么不能只看「端口有没有人应答」：
+# 换了脚本但没换进程时，旧代理照样在应答，升级就静默失效了 ——
+# 「检查 redroid 容器」一直按旧行为报错，而日志里什么都看不出来。
+# 实测：探针名不在白名单，代理回 403；`curl -s` 不带 -f 时 403 也算成功，
+# 于是每次都判定"已在运行"，旧进程永远换不掉。
+# 所以这里比对代理自报的版本号，对不上就先把旧进程停掉再起新的。
+ensure_redroid_proxy() {
+    local running
+    running="$(proxy_reported_version)"
+
+    if [ "${running}" = "${REDROID_PROXY_VERSION}" ]; then
+        return 0
+    fi
+
+    if [ -n "${running}" ]; then
+        log_msg "redroid proxy version changed (running=${running}, expected=${REDROID_PROXY_VERSION}), restarting ..."
+        stop_redroid_proxy
+    elif proxy_port_answered; then
+        # 端口有人应答却问不到版本：要么是本项目旧版代理（还没有 /version 端点），
+        # 要么是别的进程占着这个端口。前者要换掉；后者换不掉，
+        # 会在下面启动失败、记一条 WARN，不影响主功能。
+        log_msg "redroid proxy on ${REDROID_PROXY_HOST}:${REDROID_PROXY_PORT} reports no version (legacy build?), restarting ..."
+        stop_redroid_proxy
+    fi
+
+    if [ ! -f "${REDROID_PROXY_PY}" ]; then
+        log_msg "redroid proxy script not found: ${REDROID_PROXY_PY} (skip)"
+        return 0
+    fi
+
+    log_msg "Starting redroid status proxy on ${REDROID_PROXY_HOST}:${REDROID_PROXY_PORT} ..."
+    # MAA_REDROID_PORT 注入给代理：默认名查不到时按这个端口反查真实容器名
+    MAA_REDROID_PORT="${REDROID_PORT}" \
+        setsid nohup python3 "${REDROID_PROXY_PY}" > "${REDROID_PROXY_LOG}" 2>&1 < /dev/null &
+    sleep 1
+
+    running="$(proxy_reported_version)"
+    if [ "${running}" = "${REDROID_PROXY_VERSION}" ]; then
+        log_msg "redroid proxy started (version ${running})."
+    elif proxy_port_answered; then
+        log_msg "WARN: redroid proxy version mismatch after start (reported=${running:-none}, expected=${REDROID_PROXY_VERSION})."
+    else
+        log_msg "WARN: redroid proxy failed to start (功能可能不可用，不影响主功能)"
+    fi
+    return 0
+}
+
+# 容器是否在运行
+status_container() {
+    docker ps --filter "name=^${CONTAINER}$" --format '{{.Names}}' 2>/dev/null | grep -q "${CONTAINER}"
+}
+
+# 当前容器是不是「网关改造前」那种 —— 只有它会把宿主 18000 映射进来。
+# 新容器一个端口都不映射，所以这是回退分支唯一的合法前提。
+# 卡这一下是必要的：本机别的服务万一占了 18000、又对任何路径都回 200
+# （catch-all 那种），光看状态码会把已经坏掉的 socket 误判成健康。
+legacy_port_published() {
+    docker port "${CONTAINER}" 2>/dev/null | grep -q ":${LEGACY_TCP_PORT}\$"
+}
+
+# 向应用发一个 GET。优先走网关 socket；拿不到、且当前确实是旧容器，才回退它的 TCP 端口。
+# 输出响应体；返回码表示「有没有拿到成功响应」（用了 -f，只有 2xx 才算）。
+api_get() {
+    local path="$1" out
+    if out="$(curl -sf --max-time "${HEALTH_TIMEOUT}" --unix-socket "${GATEWAY_SOCKET}" \
+            "http://localhost${path}" 2>/dev/null)"; then
+        printf '%s' "${out}"
+        return 0
+    fi
+    if legacy_port_published; then
+        if out="$(curl -sf --max-time "${HEALTH_TIMEOUT}" \
+                "http://127.0.0.1:${LEGACY_TCP_PORT}${path}" 2>/dev/null)"; then
+            printf '%s' "${out}"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# 请应用停掉进行中的任务链（POST /api/stop）。同样要能回退旧容器，
+# 否则升级路径上这一步会打空，任务链还是会被硬切。
+api_post_stop() {
+    if curl -sS --max-time 5 --unix-socket "${GATEWAY_SOCKET}" -X POST "http://localhost/api/stop" \
+            >> "${LOG_FILE}" 2>&1; then
+        return 0
+    fi
+    # 回退同样加门控：别把 /api/stop 打到本机恰好占着 18000 的别的服务上
+    legacy_port_published || return 0
+    curl -sS --max-time 5 -X POST "http://127.0.0.1:${LEGACY_TCP_PORT}/api/stop" \
+        >> "${LOG_FILE}" 2>&1 || true
+    return 0
+}
+
+# 容器现在用的镜像，是不是包里的那一份。
+# 「容器在跑就直接复用」是个坑：升级装进来的新镜像已经就位，容器却还挂在旧镜像上，
+# 跑的还是旧代码，而界面上一切正常 —— 升级等于白做。所以这里必须比对镜像 ID。
+container_image_matches() {
+    local have
+    docker image inspect "${IMAGE}" >/dev/null 2>&1 || return 1
+    ensure_expected_id || return 1
+    have="$(docker inspect --format '{{.Image}}' "${CONTAINER}" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "${have}" ] || return 1
+    expected_id_matches "${have}"
+}
+
+# 容器已经启动多久（秒）。拿不到就返回非 0。
+# 调用方（status）据此跳过宽限期判断、直接去探活 ——
+# **不**拿它当免检理由，否则 docker inspect 持续失败时，
+# 服务卡死会被一直显示成"运行中"。
+container_uptime() {
+    local started secs
+    started="$(docker inspect --format '{{.State.StartedAt}}' "${CONTAINER}" 2>/dev/null)" || return 1
+    [ -n "${started}" ] || return 1
+    # 去掉纳秒部分，GNU date 能直接解析 2026-09-18T05:37:57Z
+    started="$(printf '%s' "${started}" | sed 's/\.[0-9]*//')"
+    secs="$(date -d "${started}" +%s 2>/dev/null)" || return 1
+    [ -n "${secs}" ] || return 1
+    printf '%s\n' "$(( $(date +%s) - secs ))"
+}
+
+# 探活失败的 WARN 日志要不要写：HEALTH_WARN_THROTTLE 秒内只写一条。
+# 应用中心会高频轮询 status（几秒一次），服务一旦卡死，
+# 不节流会把 info.log 一直刷下去。
+should_log_health_warn() {
+    local now last=0
+    now="$(date +%s)"
+    if [ -f "${HEALTH_WARN_STAMP}" ]; then
+        # 落盘时带了换行，这里 read 正常返回 0
+        read -r last < "${HEALTH_WARN_STAMP}" 2>/dev/null
+    fi
+    case "${last}" in ''|*[!0-9]*) last=0 ;; esac
+    if [ "${last}" -gt 0 ] && [ "$((now - last))" -lt "${HEALTH_WARN_THROTTLE}" ]; then
+        return 1
+    fi
+    # 写不进去（目录只读等）就退化成"每条都记"，不影响判活
+    printf '%s\n' "${now}" > "${HEALTH_WARN_STAMP}" 2>/dev/null || true
+    return 0
+}
+
+# 应用是否健康：容器在运行，且服务真的响应
+# 注意 PID_FILE 是死代码（全仓库只 rm、从不写），原先那个判断恒为假，
+# 等价于只看 status_container —— 容器在但服务死了照样报"运行中"。
+status() {
+    status_container || return 1
+
+    local up detail
+    if up="$(container_uptime)"; then
+        if [ "${up}" -lt "${HEALTH_GRACE}" ]; then
+            # 启动宽限期内不探活，直接认为健康。
+            # 局限：宽限期看的是**容器**的启动时间，不是**服务**的就绪时间。
+            # 容器已经跑了很久、服务进程在容器内自己重启的那几秒，宽限期帮不上忙，
+            # 会短暂误报"异常"，等服务起来就自愈。
+            return 0
+        fi
+        detail="uptime=${up}s"
+    else
+        # 拿不到启动时间。容器明明在跑，StartedAt 本不该缺，属异常情况。
+        # 这里**不能**直接返回健康：docker inspect 持续失败时若一律豁免探活，
+        # 服务卡死就会被应用中心永久显示成"运行中"，
+        # 恰好绕开本 PR 想解决的"容器在 ≠ 服务在"。
+        # 所以退化成照样探活，由 HTTP 结果给结论；失败日志已有节流，不会刷屏。
+        detail="uptime=unknown, docker inspect failed"
+    fi
+
+    if api_get "${HEALTH_CHECK_PATH}" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if should_log_health_warn; then
+        log_msg "WARN: container ${CONTAINER} is running but ${GATEWAY_SOCKET} is not responding (${detail})."
+    fi
+    return 1
+}
+
+start_process() {
+    check_docker || return 1
+    cleanup_legacy_container
+    ensure_image || return 1
+    ensure_redroid_proxy || true
+
+    if status_container; then
+        if container_image_matches; then
+            log_msg "Container already running."
+            return 0
+        fi
+        # 容器在跑，但挂的是旧镜像：先把任务链收尾，再拆掉容器重建。
+        log_msg "Container runs a stale image -> recreating with ${IMAGE}."
+        stop_running_tasks
+        docker stop --time "${DOCKER_STOP_TIMEOUT}" "${CONTAINER}" >> "${LOG_FILE}" 2>&1 || true
+        docker rm -f "${CONTAINER}" >> "${LOG_FILE}" 2>&1 || true
+    fi
+
+    # 清掉同名的停止态容器
+    docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
+
+    mkdir -p "${DATA_DIR}" 2>/dev/null || true
+
+    # socket 专用目录 + 软链。
+    # 容器以 root 跑，socket 最终属主由启动器 chown 决定 —— 它取 socket 所在目录的属主，
+    # 所以这个目录必须由 package 用户建出来（本脚本就是这个身份）。docker 自动创建的挂载点
+    # 属主是 root，那会让应用自己的探活被自己挡掉。所以这里不像 DATA_DIR 那样吞错误：
+    # 建不出来就当场失败，免得留下一个悄悄坏掉的部署。
+    if ! mkdir -p "${GATEWAY_DIR}"; then
+        write_user_error "无法创建网关 socket 目录 ${GATEWAY_DIR}"
+        return 1
+    fi
+    # 属主显式传进去，不靠启动器去猜挂载点归谁（取不到就留空，启动器会回退到目录属主，结果一致）
+    GATEWAY_OWNER="$(stat -c '%u:%g' "${GATEWAY_DIR}" 2>/dev/null || true)"
+    rm -f "${GATEWAY_SOCKET}"
+    ln -s "${GATEWAY_DIR}/app.sock" "${GATEWAY_SOCKET}" 2>/dev/null || true
+
+    log_msg "Starting container ${CONTAINER} ..."
+    # --init：给容器注入 tini 当 init，负责回收被应用遗弃的孤儿/僵尸进程。
+    # 应用侧不会 wait() 自己起的 adb/sh 子进程，实测容器里会一直挂着
+    # [adb] <defunct> / [sh] <defunct>，父进程都是 PID 1，且不会自己消失。
+    # unless-stopped：容器非正常退出（崩溃 / OOM / 宿主重启）时由 docker 自己拉起来。
+    # 显式 `docker stop`（即本脚本的 stop）属于"人为停止"，不会被重启，
+    # 所以应用中心的停用语义不受影响。
+    docker run -d --name "${CONTAINER}" \
+        --restart unless-stopped \
+        --init \
+        -e MAA_ADAPTER=official \
+        -e MAA_CORE_DIR=/opt/maa \
+        -e MAA_WEB_SOCKET=/gw/app.sock \
+        -e "MAA_WEB_SOCKET_OWNER=${GATEWAY_OWNER}" \
+        -e TZ=Asia/Shanghai \
+        -e REDROID_PROXY_HOST="${REDROID_PROXY_HOST}" \
+        -e REDROID_PROXY_PORT="${REDROID_PROXY_PORT}" \
+        -v "${DATA_DIR}:/app/data" \
+        -v "${GATEWAY_DIR}:/gw" \
+        "${IMAGE}" >> "${LOG_FILE}" 2>&1
+
+    sleep 3
+    if status_container; then
+        log_msg "Container started: ${CONTAINER} (gateway socket: ${GATEWAY_SOCKET})"
+        return 0
+    fi
+
+    write_user_error "MAA 容器启动失败，请查看日志 ${LOG_FILE}"
+    return 1
+}
+
+# 读应用上报的运行状态（GET /api/status 的 state 字段）
+api_state() {
+    api_get /api/status \
+        | tr -d '\n' \
+        | grep -oE '"state"[[:space:]]*:[[:space:]]*"[^"]*"' \
+        | head -1 \
+        | sed 's/.*:[[:space:]]*"//; s/"$//'
+}
+
+# 应用状态机共 8 个取值（上游 maa-web/app/models.py 的 RunnerStateName）：
+#   Idle / Connecting / AppendingTasks / Running / Stopping / Stopped / Completed / Failed
+# 「终态」= 没有进行中的任务链，不需要优雅停。
+# 特别注意 Idle：它是应用刚起来的默认态，必须算终态，
+# 否则每次停用一个闲置实例都要白等一轮。
+# 其余（Connecting / AppendingTasks / Running / Stopping，以及将来新增的未知状态）
+# 一律按"还在干活"处理：宁可多等一轮，也不硬切任务链。
+is_terminal_state() {
+    case "$1" in
+        ""|Idle|Stopped|Completed|Failed) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# 请应用优雅停掉进行中的任务链
+# 为什么不能只靠 docker stop：它给容器发 SIGTERM 后会直接杀掉 MaaCore，
+# 任务进度不落盘，重启后前端持有的旧 run_id 失效、任务状态整体错位。
+# 本函数只在"手动停用 / 升级"这条路径上被调用（见 stop_process）；
+# 容器自己退出后被 docker 拉起的情况不经过这里。
+stop_running_tasks() {
+    local state elapsed=0
+
+    state="$(api_state)"
+    if [ -z "${state}" ]; then
+        log_msg "API not reachable, skip graceful stop."
+        return 0
+    fi
+    if is_terminal_state "${state}"; then
+        log_msg "No active task chain (state=${state}), skip graceful stop."
+        return 0
+    fi
+
+    # Stopping 说明应用自己已经在收尾了，重复下发没有意义，等它落到终态即可
+    if [ "${state}" = "Stopping" ]; then
+        log_msg "Runner is already stopping, waiting for it to settle ..."
+    else
+        log_msg "Runner is active (state=${state}), requesting graceful stop ..."
+        api_post_stop
+    fi
+
+    while [ "${elapsed}" -lt "${GRACEFUL_STOP_TIMEOUT}" ]; do
+        sleep 2
+        elapsed=$((elapsed + 2))
+        state="$(api_state)"
+        if [ -z "${state}" ]; then
+            # 探测不到就没法继续判断，交给 docker stop 兜底，不做无意义的空等
+            log_msg "API became unreachable while waiting (${elapsed}s), stopping container anyway."
+            return 0
+        fi
+        if is_terminal_state "${state}"; then
+            log_msg "Task chain released after ${elapsed}s (state=${state})."
+            return 0
+        fi
+    done
+
+    log_msg "WARN: graceful stop timed out after ${GRACEFUL_STOP_TIMEOUT}s (state=${state}), stopping container anyway."
+    return 0
+}
+
+stop_process() {
+    # 先让应用收尾，再停容器
+    if status_container; then
+        stop_running_tasks
+    fi
+
+    log_msg "Stopping container ${CONTAINER} ..."
+    # 优雅停成功后应用已经空闲，这里基本秒回，20s 绰绰有余；
+    # 万一上面等超时了，说明应用已经卡死，20s 后照样 SIGKILL ——
+    # 与不做优雅停时的最终行为一致，只是多花了一段等待。
+    docker stop --time "${DOCKER_STOP_TIMEOUT}" "${CONTAINER}" >> "${LOG_FILE}" 2>&1 || true
+    docker rm -f "${CONTAINER}" >> "${LOG_FILE}" 2>&1 || true
+    rm -f "${PID_FILE}"
+    log_msg "Container stopped."
+    return 0
+}
+
+case "$1" in
+start)
+    start_process
+    ;;
+stop)
+    stop_process
+    ;;
+status)
+    if status; then
+        exit 0
+    else
+        exit 3
+    fi
+    ;;
+image-ids)
+    # 只读内部子命令：把包内镜像包的合法候选 ID 输出到 stdout，供安装脚本读取。
+    # 不写指纹、不连接 Docker、不启停服务；其他 case 行为不变。
+    derive_image_id "${IMAGE_TGZ}" || derive_image_id "${IMAGE_TAR}"
+    ;;
+*)
+    echo "Unknown command: $1" > "${TRIM_TEMP_LOGFILE}"
+    exit 1
+    ;;
+esac

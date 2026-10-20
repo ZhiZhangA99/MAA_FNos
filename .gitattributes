@@ -1,0 +1,13 @@
+# 全部文本文件一律以 LF 存储与检出。
+# 这个项目的脚本要在飞牛 Linux 上执行，CRLF 会导致 shebang 失效
+# (`#!/bin/bash\r` → bad interpreter)。
+* text=auto eol=lf
+
+# 二进制文件不做任何转换
+*.png binary
+*.PNG binary
+*.ico binary
+*.fpk binary
+*.gz  binary
+*.tar binary
+*.zip binary

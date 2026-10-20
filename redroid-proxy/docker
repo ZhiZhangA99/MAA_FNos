@@ -1,0 +1,93 @@
+#!/bin/bash
+# docker —— 最小权限代理（容器内使用）
+# ---------------------------------------
+# 只实现 `docker inspect --format "{{.State.Status}}|{{.State.Running}}" <name>`
+# 其余一律拒绝。实际查询由宿主机侧代理（172.17.0.1:18001）完成。
+#
+# 这样做是为了让 MAA-WEB-CONTROL 的「检查 redroid 容器」功能可用，
+# 同时不给容器任何启停/删除其他容器的能力。
+
+PROXY_HOST="${REDROID_PROXY_HOST:-172.17.0.1}"
+PROXY_PORT="${REDROID_PROXY_PORT:-18001}"
+
+# 仅支持的固定 format
+WANT_FMT='{{.State.Status}}|{{.State.Running}}'
+
+usage_err() {
+    echo "docker: 该代理仅支持: docker inspect --format '${WANT_FMT}' <container>" >&2
+    exit 1
+}
+
+# 解析参数
+[ "$1" = "inspect" ] || usage_err
+shift
+
+fmt=""
+name=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --format|-f)
+            fmt="$2"
+            shift 2
+            ;;
+        --type|--size|-s)
+            # 不支持，直接拒绝
+            usage_err
+            ;;
+        -*)
+            usage_err
+            ;;
+        *)
+            name="$1"
+            shift
+            ;;
+    esac
+done
+
+[ -n "$name" ] || usage_err
+
+# format 必须是我们支持的那一个（允许外层引号差异）
+case "$fmt" in
+    "$WANT_FMT"|"{{.State.Status}}|{{.State.Running}}") ;;
+    "")
+        # 无 format 时，模拟 docker inspect 的 JSON 输出不做支持，直接拒绝
+        usage_err
+        ;;
+    *)
+        usage_err
+        ;;
+esac
+
+# 通过 HTTP 查询宿主机侧代理
+resp="$(curl -sS --max-time 8 "http://${PROXY_HOST}:${PROXY_PORT}/inspect?name=$(printf '%s' "$name" | sed 's/ /%20/g')" 2>/dev/null)"
+
+if [ -z "$resp" ]; then
+    echo "docker: 无法连接状态代理 ${PROXY_HOST}:${PROXY_PORT}" >&2
+    exit 1
+fi
+
+# 极简 JSON 解析（不依赖 jq/python）
+ok=$(printf '%s' "$resp" | sed -n 's/.*"ok"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p')
+err=$(printf '%s' "$resp" | sed -n 's/.*"error"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+status=$(printf '%s' "$resp" | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+running=$(printf '%s' "$resp" | sed -n 's/.*"running"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p')
+
+if [ "$ok" = "true" ]; then
+    printf '%s|%s\n' "$status" "$running"
+    exit 0
+fi
+
+# 失败：尽量贴近真实 docker 的报错措辞，便于上游识别
+if [ -n "$err" ]; then
+    case "$err" in
+        *"No such object"*|*"No such container"*)
+            echo "Error: No such object: $name" >&2
+            ;;
+        *)
+            echo "$err" >&2
+            ;;
+    esac
+else
+    echo "docker inspect 失败" >&2
+fi
+exit 1

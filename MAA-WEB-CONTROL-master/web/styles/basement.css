@@ -1,0 +1,855 @@
+.maaLayout {
+  display: grid;
+  /* 中间表单只有 ~330px 宽，超宽屏用 1fr 会把它孤零零丢在一大片空白中间；
+     改为限宽 + 整体居中，多余空间给日志列。 */
+  grid-template-columns: 210px minmax(360px, 520px) minmax(320px, 560px);
+  justify-content: center;
+  gap: 24px;
+  width: 100%;
+  max-width: 1560px;
+  height: 100%;
+  min-height: 0;
+  margin: 0 auto;
+  padding: 20px 24px;
+}
+
+.taskColumn {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  width: 210px;
+}
+
+.taskBox {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 220px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  padding: 12px 10px 10px;
+}
+
+.taskList {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.taskItem {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 24px;
+  align-items: center;
+  width: 100%;
+  min-height: 26px;
+  border: 0;
+  border-radius: var(--radius);
+  padding: 0 6px;
+  background: transparent;
+  text-align: left;
+  transition: background-color var(--t-fast), box-shadow var(--t-fast);
+}
+
+.taskItem:hover {
+  background: var(--hover-bg);
+}
+
+.taskItem.dragging {
+  opacity: 0.45;
+}
+
+.taskItem.dropBefore {
+  box-shadow: inset 0 2px 0 var(--blue);
+}
+
+.taskItem.dropAfter {
+  box-shadow: inset 0 -2px 0 var(--blue);
+}
+
+.taskItem.disabled {
+  opacity: 0.55;
+}
+
+.taskItem.locked {
+  opacity: 0.72;
+}
+
+.taskItem.locked .taskEnable,
+.taskItem.locked .taskConfigButton,
+.profileItem.locked {
+  cursor: not-allowed;
+}
+
+.taskEnable {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+}
+
+.taskNameButton,
+.taskConfigButton {
+  min-height: 23px;
+  border: 0;
+  background: transparent;
+}
+
+.taskNameButton {
+  padding: 0 0 0 2px;
+  text-align: left;
+}
+
+.taskConfigButton {
+  padding: 0;
+  color: #6f737a;
+}
+
+.taskItem.active .taskConfigButton {
+  color: var(--blue);
+}
+
+.taskNameButton strong {
+  overflow: hidden;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.taskNameButton .meta {
+  display: none;
+}
+
+.taskButtons {
+  display: grid;
+  grid-template-columns: 34px 1fr 1fr;
+  gap: 0;
+  margin-top: 10px;
+}
+
+.taskButtons button {
+  border-radius: 0;
+}
+
+.taskButtons button:first-child {
+  border-radius: 4px 0 0 4px;
+}
+
+.taskButtons button:last-child {
+  border-radius: 0 4px 4px 0;
+}
+
+.taskPopupMenu {
+  position: fixed;
+  z-index: 40;
+  display: grid;
+  min-width: 146px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #1b1b1d;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+}
+
+.taskPopupMenu button {
+  display: grid;
+  min-height: 28px;
+  border: 0;
+  background: transparent;
+  padding: 4px 9px;
+  text-align: left;
+}
+
+.taskPopupMenu button:hover {
+  background: var(--blue-soft);
+}
+
+.taskPopupMenu button.danger {
+  color: #ff8a8a;
+}
+
+.taskTypeMenu {
+  min-width: 170px;
+}
+
+.taskTypeMenu button {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 14px;
+}
+
+.taskTypeMenu strong {
+  font-weight: 400;
+}
+
+.taskTypeMenu span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.afterRun {
+  display: grid;
+  gap: 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
+  text-align: center;
+}
+
+.afterRun span {
+  color: var(--text);
+}
+
+.afterRun strong {
+  font-weight: 400;
+}
+
+.afterRunLabel {
+  color: var(--text);
+}
+
+.afterRunSelect {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+}
+
+.afterRunCommand {
+  margin-top: 4px;
+  width: 100%;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 0 6px;
+  font-family: monospace;
+}
+
+.afterRunTimeout {
+  margin-top: 4px;
+  width: 80px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 0 6px;
+}
+
+.linkStart {
+  width: 130px;
+  height: 46px;
+  margin: 4px auto 0;
+  border-color: #2f91c7;
+  background: linear-gradient(#187fbd, #096fa8);
+  color: #f7fbff;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.linkStart:hover:not(:disabled) {
+  border-color: #4dbbff;
+  color: #fff;
+}
+
+.linkStart.stopStart {
+  border-color: #ba4545;
+  background: linear-gradient(#a83838, #842727);
+  color: #fff3f3;
+}
+
+.linkStart.stopStart:hover:not(:disabled) {
+  border-color: #ff7777;
+  color: #fff;
+}
+
+.ghost {
+  display: none;
+}
+
+.settingsArea {
+  display: grid;
+  align-content: start;
+  justify-items: center;
+  gap: 16px;
+  min-height: 0;
+  /* 必须保持 visible：任务表单第一行的 ? 气泡是向上弹出的绝对定位元素 */
+  overflow: visible;
+  padding: 4px 8px 16px;
+}
+
+.taskEditor {
+  display: grid;
+  grid-template-columns: minmax(240px, 330px);
+  gap: 10px;
+  overflow: visible;
+}
+
+.taskEditor.empty {
+  color: var(--muted);
+}
+
+.taskEditor.locked {
+  opacity: 0.82;
+}
+
+.formGrid,
+.maaParams {
+  display: grid;
+  gap: 12px;
+}
+
+.formGrid {
+  grid-template-columns: repeat(2, minmax(150px, 1fr));
+}
+
+.maaParams {
+  width: 230px;
+}
+
+label,
+.paramRow,
+.toggleRow {
+  color: var(--text);
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.toggleRow {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+}
+
+.toggleRow input[type="checkbox"] {
+  flex: 0 0 15px;
+  margin: 0;
+}
+
+.paramRow {
+  display: grid;
+  grid-template-columns: 100px 110px;
+  align-items: center;
+  min-height: 30px;
+}
+
+.fightForm {
+  width: 300px;
+}
+
+.fightForm .paramRow {
+  grid-template-columns: 116px 122px;
+  column-gap: 10px;
+}
+
+.fightForm .paramRow input[type="number"] {
+  width: 80px;
+}
+
+.paramRow.wide {
+  grid-template-columns: 100px 1fr;
+}
+
+.paramRow .checkLabel {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+
+.paramRow input[type="number"] {
+  width: 70px;
+}
+
+input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--blue);
+}
+
+.modeTabs {
+  display: grid;
+  grid-template-columns: 110px 110px;
+  width: 220px;
+}
+
+.modeTabs button {
+  border-radius: 0;
+}
+
+.modeTabs .active {
+  border-color: var(--blue);
+  color: #28a9ff;
+}
+
+.modeTabs button:disabled {
+  color: #666a70;
+  opacity: 0.55;
+}
+
+.settingsLocked .settingsContent {
+  opacity: 0.88;
+}
+
+.tipsBlock {
+  width: 260px;
+  color: var(--muted);
+  line-height: var(--lh-tight);
+  white-space: pre-line;
+}
+
+.tipsBlock span {
+  display: block;
+  margin-bottom: 2px;
+}
+
+.eventColumn {
+  display: grid;
+  grid-template-rows: auto minmax(120px, 1fr) auto;
+  gap: 12px;
+  min-height: 0;
+  height: 100%;
+}
+
+.miniStatus {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+  gap: 6px;
+}
+
+.miniStatus div,
+.eventPanel,
+.placeholderPanel {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  padding: 9px;
+}
+
+.eventPanel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+}
+
+.rawLogPanel {
+  grid-template-rows: auto;
+}
+
+.miniStatus span,
+.profileHint {
+  color: var(--muted);
+}
+
+.miniStatus strong {
+  display: block;
+  margin-top: 4px;
+  font-size: var(--fs-md);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.panelHead {
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.logList,
+.profileList {
+  display: grid;
+  gap: 7px;
+}
+
+.logList {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+  align-content: start;
+}
+
+.rawLogPanel .panelHead {
+  margin-bottom: 0;
+}
+
+.rawLogList {
+  max-height: 260px;
+}
+
+.rawLogList[hidden] {
+  display: none;
+}
+
+.rawLogList:not([hidden]) {
+  margin-top: 10px;
+}
+
+.rawLogToggleBtn {
+  font-size: 12px;
+  padding: 2px 10px;
+  min-width: 48px;
+}
+
+
+.profileItem {
+  width: 100%;
+  text-align: left;
+}
+
+.profileItem.active {
+  border-color: var(--blue);
+  color: #28a9ff;
+}
+
+.buttonRow {
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.wideForm {
+  width: 220px;
+}
+
+.infrastForm {
+  gap: 9px;
+}
+
+.wideForm > span,
+.sectionTitle {
+  display: block;
+}
+
+.sectionTitle {
+  margin: 2px 0 4px;
+  text-align: center;
+}
+
+.hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 14px;
+  position: relative;
+  z-index: 20;
+  width: 14px;
+  height: 14px;
+  margin-left: 4px;
+  border-radius: 50%;
+  background: #292b30;
+  color: #8f949b;
+  cursor: help;
+  font-size: 11px;
+  line-height: 14px;
+  vertical-align: middle;
+}
+
+.hint::after {
+  position: absolute;
+  bottom: 19px;
+  left: 50%;
+  z-index: 50;
+  width: max-content;
+  max-width: 340px;
+  padding: 7px 9px;
+  border: 1px solid #4c5057;
+  border-radius: 4px;
+  background: #24262b;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.35);
+  color: var(--text);
+  content: attr(data-tip);
+  line-height: 1.45;
+  opacity: 0;
+  pointer-events: none;
+  text-align: left;
+  transform: translateX(-50%) translateY(2px);
+  transition: opacity 120ms ease, transform 120ms ease;
+  white-space: pre-line;
+}
+
+.hint:hover::after,
+.hint:focus::after {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.stageBlock {
+  display: grid;
+  grid-template-columns: 116px 178px;
+  column-gap: 10px;
+  align-items: start;
+}
+
+.stageLabel {
+  display: grid;
+  gap: 7px;
+  justify-items: center;
+  padding-top: 7px;
+  text-align: center;
+}
+
+.addStageButton {
+  width: 86px;
+  min-height: 26px;
+}
+
+.stagePlanList {
+  display: grid;
+  gap: 4px;
+  min-height: 30px;
+}
+
+.stagePlanList.bordered {
+  min-height: 75px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 4px;
+}
+
+.stagePlanItem {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 24px;
+  align-items: center;
+  gap: 4px;
+}
+
+.stagePlanItem.single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.stagePlanSelect {
+  width: 100%;
+}
+
+.stageRemoveButton {
+  width: 24px;
+  min-height: 24px;
+  border: 0;
+  background: transparent;
+  color: #8f949b;
+}
+
+.redText {
+  color: #ff2929;
+}
+
+.mutedCheck {
+  opacity: 0.55;
+}
+
+.subLine {
+  margin-top: -7px;
+  margin-left: 18px;
+  color: var(--muted);
+}
+
+.subLine select {
+  margin-left: 6px;
+}
+
+.subLine.disabled {
+  opacity: 0.5;
+}
+
+.smallButton {
+  width: 110px;
+}
+
+.accountInput,
+.wideInput,
+.wideForm select,
+.readonlyList,
+.reclamationText {
+  width: 220px;
+}
+
+.wideForm input[type="number"],
+.wideForm input[type="text"],
+.wideForm input[type="range"],
+.wideForm input:not([type]),
+.wideForm select {
+  width: 220px;
+}
+
+.wideForm > div:has(.accountInput) {
+  display: grid;
+  grid-template-columns: 147px 73px;
+}
+
+.wideForm > div:has(.accountInput) button {
+  border-left: 0;
+  border-radius: 0 4px 4px 0;
+}
+
+.timeRow {
+  display: grid;
+  grid-template-columns: 50px 16px 50px;
+  align-items: center;
+  width: 120px;
+}
+
+.timeRow input,
+.wideForm .timeRow input[type="number"] {
+  width: 50px;
+}
+
+.timeRow span,
+.centerText {
+  text-align: center;
+}
+
+.facilityBox,
+.readonlyList {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px 10px;
+}
+
+.facilityBox {
+  display: grid;
+  gap: 7px;
+  margin-top: -4px;
+  padding: 8px 10px;
+  width: 220px;
+}
+
+.twoButtons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  width: 220px;
+}
+
+.twoButtons button {
+  border-radius: 0;
+}
+
+.twoButtons button:first-child {
+  border-radius: 4px 0 0 4px;
+}
+
+.twoButtons button:last-child {
+  border-left: 0;
+  border-radius: 0 4px 4px 0;
+}
+
+.inlineCheck {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.readonlyList {
+  display: grid;
+  gap: 16px;
+  min-height: 95px;
+}
+
+.reclamationText {
+  max-height: 410px;
+  overflow-y: auto;
+  padding-right: 8px;
+  line-height: 1.45;
+}
+
+.reclamationText p + p {
+  margin-top: 8px;
+}
+
+.advancedBlock {
+  display: none;
+}
+
+.taskItem.active {
+  background: var(--blue-soft);
+  box-shadow: inset 2px 0 0 var(--blue);
+  outline: 0;
+}
+
+/* ── 响应式：小屏幕按列堆叠，而不是把日志列裁掉 ─────────── */
+@media (max-width: 1180px) {
+  .maaLayout {
+    grid-template-columns: 210px minmax(0, 1fr);
+    height: auto;
+    min-height: 100%;
+  }
+
+  /* 只作用于一键长草页：.eventColumn 是共享类，作业页/工具页有各自的父网格 */
+  .maaLayout > .eventColumn {
+    grid-column: 1 / -1;
+    height: auto;
+    grid-template-rows: auto auto auto;
+  }
+
+  .maaLayout .logList {
+    max-height: 320px;
+  }
+
+  .taskBox {
+    min-height: 320px;
+  }
+}
+
+@media (max-width: 820px) {
+  .maaLayout {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 16px;
+  }
+
+  .taskColumn {
+    width: 100%;
+  }
+
+  .settingsArea {
+    justify-items: start;
+  }
+}
+
+/* ── 之前在 JS 里用到但样式表里没有定义的类 ───────────── */
+.shortInput,
+.wideForm input.shortInput[type="number"] {
+  width: 76px;
+}
+
+.scrollBox {
+  min-height: 0;
+  overflow: auto;
+}
+
+.unitLabel {
+  margin-left: 6px;
+  color: var(--muted);
+}
+
+.roguelikeAdvanced {
+  align-content: start;
+}
+
+.formNote {
+  color: var(--muted);
+  line-height: var(--lh);
+}
+
+.taskNameButton:hover strong {
+  color: var(--info-fg);
+}
+
+.taskConfigButton:hover {
+  color: var(--blue-fg);
+}

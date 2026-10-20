@@ -1,0 +1,116 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from app.api import create_api_router
+from app.events import EventBus
+from app.models import Profile, TaskDefinition
+from app.runner import DryRunMaaAdapter, MaaRunnerService
+from app.storage import ProfileStore
+
+
+class ProfileApiTest(unittest.TestCase):
+    def test_put_profile_persists_adb_instance_options(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, client = self._client(Path(directory))
+
+            response = client.put("/api/profiles/daily", json={
+                "name": "daily",
+                "adb": {
+                    "address": "127.0.0.1:5555",
+                    "adb_path": "adb",
+                    "client_type": "Official",
+                    "touch_mode": "maatouch",
+                    "deployment_with_pause": True,
+                    "adb_lite_enabled": True,
+                    "kill_adb_on_exit": True,
+                },
+                "tasks": [],
+            })
+            loaded = store.load("daily")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(loaded.adb.touch_mode, "maatouch")
+        self.assertTrue(loaded.adb.deployment_with_pause)
+        self.assertTrue(loaded.adb.adb_lite_enabled)
+        self.assertTrue(loaded.adb.kill_adb_on_exit)
+
+    def test_get_profile_keeps_builtin_disabled_tasks_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, client = self._client(Path(directory))
+            store.save(Profile(
+                name="daily",
+                tasks=[
+                    TaskDefinition(id="startup", type="StartUp", enabled=True),
+                    TaskDefinition(id="award", type="Award", enabled=True),
+                ],
+            ))
+
+            response = client.get("/api/profiles/daily")
+
+        self.assertEqual(response.status_code, 200)
+        tasks = response.json()["tasks"]
+        self.assertEqual([task["id"] for task in tasks[:9]], [
+            "startup",
+            "award",
+            "recruit",
+            "infrast",
+            "fight",
+            "remaining-sanity",
+            "mall",
+            "roguelike",
+            "reclamation",
+        ])
+        self.assertEqual([task["id"] for task in tasks if task["enabled"]], ["startup", "award"])
+
+    def test_put_profile_preserves_user_task_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, client = self._client(root)
+            response = client.put("/api/profiles/daily", json={
+                "name": "daily",
+                "tasks": [
+                    {"id": "award", "type": "Award", "enabled": True},
+                    {"id": "startup", "type": "StartUp", "enabled": True},
+                    {"id": "custom-1", "type": "Custom", "enabled": True},
+                ],
+            })
+
+            saved = store.load("daily")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([task.id for task in saved.tasks[:3]], ["award", "startup", "custom-1"])
+
+    def test_put_profile_persists_builtin_disabled_tasks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, client = self._client(root)
+            response = client.put("/api/profiles/daily", json={
+                "name": "daily",
+                "tasks": [{"id": "award", "type": "Award", "enabled": True}],
+            })
+
+            saved = store.load("daily")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("roguelike", [task.id for task in saved.tasks])
+        self.assertFalse(next(task for task in saved.tasks if task.id == "roguelike").enabled)
+
+    def _client(self, root: Path):
+        events = EventBus()
+        store = ProfileStore(root / "profiles")
+        app = FastAPI()
+        app.include_router(create_api_router(
+            store,
+            MaaRunnerService(DryRunMaaAdapter(), events),
+            events,
+            project_root=root,
+        ))
+        return store, TestClient(app)
+
+
+if __name__ == "__main__":
+    unittest.main()

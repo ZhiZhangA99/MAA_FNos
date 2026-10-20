@@ -1,0 +1,107 @@
+#!/bin/bash
+# 应用安装完成后：导入内置的 MAA Docker 镜像（离线，无需联网）
+# 镜像以 gzip 压缩形式放在 app/maa-image.tar.gz（减小 fpk 体积）
+#
+# 判断"要不要导入"用的必须是**镜像指纹**，不能是"同名镜像在不在"。
+# 只看名字的话：升级包里明明换了镜像，也会被判定成"已存在"而跳过导入，
+# 装完之后跑的其实还是旧镜像 —— 而且全程没有任何报错。
+
+LOG_FILE="${TRIM_PKGVAR}/install.log"
+IMAGE="maa-fnos:local"
+TAR_GZ="${TRIM_APPDEST}/maa-image.tar.gz"
+TMP_TAR="${TRIM_PKGVAR}/maa-image.tar"
+ID_FILE="${TRIM_APPDEST}/maa-image.id"
+
+log_msg() {
+    mkdir -p "${TRIM_PKGVAR}" 2>/dev/null || true
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"
+}
+
+write_user_error() {
+    echo "$1" > "${TRIM_TEMP_LOGFILE}"
+    log_msg "ERROR: $1"
+}
+
+# 当前镜像 ID 是否命中期望候选集（ID_FILE，每行一个 sha256:...）。
+# docker 的 .Id 带 sha256: 前缀，候选也是，前缀有无都比一遍。
+id_matches() {
+    local current want
+    current="$(printf '%s' "$1" | tr -d '[:space:]')"
+    [ -n "${current}" ] || return 1
+    [ -s "${ID_FILE}" ] || return 1
+    while IFS= read -r want; do
+        want="$(printf '%s' "${want}" | tr -d '[:space:]')"
+        [ -n "${want}" ] || continue
+        if [ "${current}" = "${want}" ] || [ "${current#sha256:}" = "${want#sha256:}" ]; then
+            return 0
+        fi
+    done < "${ID_FILE}"
+    return 1
+}
+
+log_msg "install_callback started. APPDEST=${TRIM_APPDEST}"
+
+if ! command -v docker >/dev/null 2>&1; then
+    write_user_error "未找到 docker，请先在应用中心安装 Docker。"
+    exit 0
+fi
+
+if [ ! -f "${TAR_GZ}" ]; then
+    write_user_error "离线镜像包不存在：${TAR_GZ}"
+    exit 0
+fi
+
+# 期望指纹直接取自包内的镜像包本身，且与运行时同一套推导逻辑：
+# main 的只读 image-ids 子命令给出全部合法候选（经典 Config / OCI index digest），
+# 每行一个。只取 Config 在 Docker 29（containerd 存储）下与真实镜像 ID 不符，
+# 会导致安装误判并重复 load/rmi —— 所以这里用候选集。
+log_msg "Reading image id(s) from ${TAR_GZ} ..."
+EXPECT_IDS="$(bash "$(dirname "${BASH_SOURCE[0]}")/main" image-ids 2>>"${LOG_FILE}")" || EXPECT_IDS=""
+if [ -z "${EXPECT_IDS}" ]; then
+    write_user_error "无法从 ${TAR_GZ} 解析镜像信息，请查看日志 ${LOG_FILE}"
+    exit 0
+fi
+printf '%s\n' "${EXPECT_IDS}" > "${ID_FILE}" 2>/dev/null || true
+log_msg "Expected image id(s): $(printf '%s' "${EXPECT_IDS}" | tr '\n' ' ')"
+
+# 已加载的镜像命中期望候选，才是真的可以跳过
+CUR_ID="$(docker image inspect --format '{{.Id}}' "${IMAGE}" 2>/dev/null | tr -d '[:space:]')"
+if [ -n "${CUR_ID}" ] && id_matches "${CUR_ID}"; then
+    log_msg "Image already loaded and id matches, skip load."
+    exit 0
+fi
+
+# 不一致：先摘掉旧 tag，否则 load 进来只会把旧镜像挤成悬空镜像
+if [ -n "${CUR_ID}" ]; then
+    log_msg "Image id mismatch (have=${CUR_ID}) -> removing stale image before load."
+    docker rmi -f "${IMAGE}" >> "${LOG_FILE}" 2>&1 || true
+fi
+
+log_msg "Decompressing ${TAR_GZ} -> ${TMP_TAR} ..."
+# gunzip 对「压缩流完好、尾部多几个字节」的包返回 2（trailing garbage），
+# 但解出的 tar 是完整的。只看返回码会误杀好包 —— 改为校验产物。
+gunzip -c "${TAR_GZ}" > "${TMP_TAR}" 2>> "${LOG_FILE}" || true
+if [ ! -s "${TMP_TAR}" ] || ! tar -tf "${TMP_TAR}" manifest.json >/dev/null 2>&1; then
+    rm -f "${TMP_TAR}"
+    write_user_error "镜像解压失败，请查看日志 ${LOG_FILE}"
+    exit 0
+fi
+
+log_msg "Loading image (this may take a few minutes) ..."
+if docker load -i "${TMP_TAR}" >> "${LOG_FILE}" 2>&1; then
+    log_msg "Image loaded successfully."
+    # 复核一次：导入后的实际 ID 必须命中期望候选，否则说明包本身有问题
+    AFTER_ID="$(docker image inspect --format '{{.Id}}' "${IMAGE}" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "${AFTER_ID}" ] && id_matches "${AFTER_ID}"; then
+        log_msg "Verified: loaded image id matches expected."
+    else
+        log_msg "WARN: loaded image id ${AFTER_ID} does not match expected $(printf '%s' "${EXPECT_IDS}" | tr '\n' ' ')."
+    fi
+else
+    write_user_error "镜像导入失败，请查看日志 ${LOG_FILE}"
+fi
+
+# 清理临时 tar，节省空间（镜像已进 docker 存储）
+rm -f "${TMP_TAR}"
+
+exit 0

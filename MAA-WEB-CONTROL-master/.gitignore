@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+data/runtime/
+*.png
+.serena/
+.claude/
+data/
+.tmp/

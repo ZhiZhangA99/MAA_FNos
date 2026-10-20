@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 650" font-family="Microsoft YaHei, PingFang SC, Noto Sans SC, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#555"/>
+    </marker>
+  </defs>
+  <rect width="840" height="650" fill="#FFFFFF"/>
+
+  <!-- 浏览器 -->
+  <rect x="125" y="20" width="300" height="76" rx="10" fill="#E8F0FE" stroke="#4A7FE0" stroke-width="1.5"/>
+  <text x="275" y="48" text-anchor="middle" font-size="16" font-weight="600" fill="#2B2B2B">浏览器（电脑 / 手机）</text>
+  <text x="275" y="72" text-anchor="middle" font-size="13" fill="#555">点桌面 MAA 图标 → 经飞牛统一网关打开</text>
+
+  <line x1="275" y1="96" x2="275" y2="126" stroke="#555" stroke-width="1.8" marker-end="url(#arr)"/>
+
+  <!-- 飞牛应用框架（含统一网关） -->
+  <rect x="105" y="130" width="340" height="88" rx="10" fill="#F3E8FD" stroke="#8A4FE0" stroke-width="1.5"/>
+  <text x="275" y="158" text-anchor="middle" font-size="16" font-weight="600" fill="#2B2B2B">飞牛 fnOS 应用框架</text>
+  <text x="275" y="182" text-anchor="middle" font-size="13" fill="#555">cmd/main：start | stop | status</text>
+  <text x="275" y="202" text-anchor="middle" font-size="13" fill="#555">统一网关 → unix socket（不映射端口）</text>
+
+  <line x1="275" y1="218" x2="275" y2="248" stroke="#555" stroke-width="1.8" marker-end="url(#arr)"/>
+
+  <!-- 容器 -->
+  <rect x="60" y="252" width="430" height="280" rx="12" fill="#FFFFFF" stroke="#4A7FE0" stroke-width="2.5"/>
+  <text x="275" y="282" text-anchor="middle" font-size="15" font-weight="600" fill="#2B2B2B">容器 maa-fnos（只挂 unix socket，不开端口）</text>
+
+  <rect x="90" y="300" width="370" height="54" rx="8" fill="#E8F0FE" stroke="#4A7FE0" stroke-width="1.2"/>
+  <text x="275" y="332" text-anchor="middle" font-size="14" fill="#2B2B2B">MAA-WEB-CONTROL —— 网页界面和接口</text>
+
+  <rect x="90" y="366" width="370" height="54" rx="8" fill="#EAF7EA" stroke="#3E9E4E" stroke-width="1.2"/>
+  <text x="275" y="398" text-anchor="middle" font-size="14" fill="#2B2B2B">MaaCore —— MAA 官方的引擎</text>
+
+  <rect x="90" y="432" width="370" height="54" rx="8" fill="#FFF3E0" stroke="#E08A2A" stroke-width="1.2"/>
+  <text x="275" y="464" text-anchor="middle" font-size="14" fill="#2B2B2B">adb —— 连安卓端（截图 / 模拟点击）</text>
+
+  <!-- adb -> redroid -->
+  <line x1="460" y1="459" x2="516" y2="460" stroke="#555" stroke-width="1.8" marker-end="url(#arr)"/>
+  <text x="488" y="446" text-anchor="middle" font-size="12" fill="#555">adb</text>
+
+  <!-- redroid -->
+  <rect x="520" y="420" width="140" height="80" rx="10" fill="#FDECEC" stroke="#D84A4A" stroke-width="1.5"/>
+  <text x="590" y="452" text-anchor="middle" font-size="15" font-weight="600" fill="#2B2B2B">redroid 容器</text>
+  <text x="590" y="476" text-anchor="middle" font-size="13" fill="#555">安卓环境</text>
+
+  <line x1="660" y1="460" x2="696" y2="460" stroke="#555" stroke-width="1.8" marker-end="url(#arr)"/>
+
+  <!-- 游戏 -->
+  <rect x="700" y="420" width="110" height="80" rx="10" fill="#FDECEC" stroke="#D84A4A" stroke-width="1.5"/>
+  <text x="755" y="466" text-anchor="middle" font-size="15" font-weight="600" fill="#2B2B2B">明日方舟</text>
+
+  <!-- 只读代理 -->
+  <line x1="275" y1="532" x2="275" y2="562" stroke="#999" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#arr)"/>
+  <text x="292" y="552" font-size="12" fill="#777">容器查 redroid 状态走这里</text>
+
+  <rect x="125" y="566" width="300" height="64" rx="10" fill="#F2F2F2" stroke="#999" stroke-width="1.4" stroke-dasharray="6,4"/>
+  <text x="275" y="594" text-anchor="middle" font-size="14" font-weight="600" fill="#2B2B2B">宿主侧只读状态代理（:18001）</text>
+  <text x="275" y="616" text-anchor="middle" font-size="12" fill="#555">查 redroid 状态走它，不拿宿主 root</text>
+</svg>

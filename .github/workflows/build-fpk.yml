@@ -1,0 +1,185 @@
+name: build-fpk
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# 只需要读代码；任何步骤都不需要写仓库或提交（产物走 artifact）。
+permissions:
+  contents: read
+
+concurrency:
+  group: build-fpk-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # 与本地 bash deploy/build.sh 共用同一份版本表，避免两条构建路径分叉。
+  MAA_VERSION_FILE: ${{ github.workspace }}/versions.env
+  MAA_BUILD_WORK: ${{ github.workspace }}/.build-work
+
+jobs:
+  build:
+    name: 构建 maa-fnos.fpk
+    # MAA 官方 Linux 包要求 glibc >= 2.38；ubuntu-24.04 自带 glibc 2.39。
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 不用 LFS：核心包走下载，仓库里不该有大文件。
+          lfs: false
+
+      - name: 显示版本钉死表
+        run: |
+          set -euo pipefail
+          echo "--- versions.env ---"
+          cat "$MAA_VERSION_FILE"
+          # shellcheck disable=SC1090
+          . "$MAA_VERSION_FILE"
+          echo "MAA_CORE_VERSION=$MAA_CORE_VERSION"
+          echo "MAA_CORE_SHA256=$MAA_CORE_SHA256"
+          case "$MAA_CORE_SHA256" in
+            __FILL_ME__|"")
+              echo "::error::versions.env 的 MAA_CORE_SHA256 还是占位符，先按文件头说明填上真值。"
+              exit 1 ;;
+          esac
+          echo "MAA_CORE_VERSION=$MAA_CORE_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: 检查仓库文件完整性（构建前提）
+        run: |
+          set -euo pipefail
+          missing=0
+          check() {
+            if [ -e "$1" ]; then echo "ok      $1"; else echo "::error file=$1::缺失：$1"; missing=1; fi
+          }
+          check MAA-WEB-CONTROL-master/serve_socket.py
+          check MAA-WEB-CONTROL-master/run.sh
+          check MAA-WEB-CONTROL-master/app/main.py
+          check MAA-WEB-CONTROL-master/pyproject.toml
+          check deploy/Dockerfile
+          check deploy/fetch-maa-core.sh
+          check redroid-proxy/docker
+          check fnos-app/manifest
+          check fnos-app/ICON.PNG
+          check fnos-app/ICON_256.PNG
+          check fnos-app/cmd/main
+          check fnos-app/app/ui/config
+          [ "$missing" -eq 0 ] || { echo "::error::构建前提缺失，见上面清单"; exit 1; }
+
+      - name: 断言源码改动仍在（适配器固定 + 可读报错）
+        run: |
+          set -euo pipefail
+          count() { grep -c "$1" "$2" || true; }
+          got_api="$(count 'status_code=409' MAA-WEB-CONTROL-master/app/api.py)"
+          got_js="$(count 'apiErrorMessage' MAA-WEB-CONTROL-master/web/core/api.js)"
+          echo "app/api.py 中 status_code=409 命中: $got_api（期望 1）"
+          echo "web/core/api.js 中 apiErrorMessage 命中: $got_js（期望 2）"
+          [ "$got_api" = "1" ] || { echo "::error file=MAA-WEB-CONTROL-master/app/api.py::缺少适配器固定逻辑（status_code=409），源码回退了？"; exit 1; }
+          [ "$got_js" = "2" ] || { echo "::error file=MAA-WEB-CONTROL-master/web/core/api.js::缺少 apiErrorMessage，源码回退了？"; exit 1; }
+
+      - name: 准备构建目录
+        run: mkdir -p "$MAA_BUILD_WORK"
+
+      - name: 下载并校验 MAA 官方核心包【需要外网】
+        run: |
+          set -euo pipefail
+          bash deploy/fetch-maa-core.sh --dest "$MAA_BUILD_WORK"
+          ls -lh "$MAA_BUILD_WORK/maa-linux.tar.gz"
+          gzip -t "$MAA_BUILD_WORK/maa-linux.tar.gz" && echo "tarball OK"
+
+      - name: 检查 Dockerfile 引用的构建上下文
+        run: |
+          set -euo pipefail
+          # Dockerfile 里 COPY 的路径必须在仓库里真实存在，否则要等 docker build
+          # 跑完依赖才报错，浪费时间。
+          grep -E '^COPY' deploy/Dockerfile
+          grep -E '^COPY' deploy/Dockerfile > /tmp/copy-lines.txt
+          while IFS= read -r line; do
+            src="$(printf '%s' "$line" | awk '{print $2}')"
+            # 含 ${...} 的是 build-arg 占位（MAA 核心包），由 build.sh 落进上下文，跳过。
+            case "$src" in
+              '${'*) echo "skip(build-arg)  $src"; continue ;;
+            esac
+            [ -e "$src" ] || { echo "::error::Dockerfile COPY 的源不存在：$src"; exit 1; }
+            echo "ok                $src"
+          done < /tmp/copy-lines.txt
+
+      - name: 构建镜像（docker build）
+        run: |
+          set -euo pipefail
+          MAA_BUILD_WORK="$MAA_BUILD_WORK" \
+          MAA_WEB_SOURCE="$GITHUB_WORKSPACE/MAA-WEB-CONTROL-master" \
+          MAA_IMAGE_TAG="maa-fnos:ci" \
+            bash deploy/build.sh
+          docker images maa-fnos:ci
+
+      - name: 镜像冒烟（MaaCore 可加载）
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint /app/.venv/bin/python maa-fnos:ci \
+            -c "import sys; sys.path.insert(0,'/opt/maa/Python'); from asst.asst import Asst; Asst.load('/opt/maa'); print('core:', Asst.get_version())"
+
+      - name: 导出镜像为离线包
+        run: |
+          set -euo pipefail
+          docker save maa-fnos:ci | gzip -9 > fnos-app/app/maa-image.tar.gz
+          ls -lh fnos-app/app/maa-image.tar.gz
+          # fpk 里要能解出 manifest.json，否则装上去导入不了
+          gzip -t fnos-app/app/maa-image.tar.gz
+          gunzip -c fnos-app/app/maa-image.tar.gz | tar -tf - | grep -qx 'manifest.json' \
+            || { echo "::error::镜像包内缺少 manifest.json"; exit 1; }
+          echo "镜像包校验通过"
+
+      - name: 安装 fnpack 1.2.3【需要外网】
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 -o /tmp/fnpack \
+            https://static2.fnnas.com/fnpack/fnpack-1.2.3-linux-amd64
+          chmod +x /tmp/fnpack
+          sudo mv /tmp/fnpack /usr/local/bin/fnpack
+          # fnpack 1.2.3 没有 --version 子命令，用 build --help 确认安装
+          fnpack build --help | head -20
+
+      - name: 打包 fpk
+        working-directory: fnos-app
+        run: |
+          set -euo pipefail
+          echo "--- 打包前目录 ---"
+          ls -la
+          ls -la app/ | head -30
+          fnpack build
+          echo "--- 产物 ---"
+          ls -lh ./*.fpk
+
+      - name: 校验 fpk 产物
+        working-directory: fnos-app
+        run: |
+          set -euo pipefail
+          mapfile -t pkgs < <(ls -1 ./*.fpk 2>/dev/null || true)
+          [ "${#pkgs[@]}" -ge 1 ] || { echo "::error::fnpack 没有产出 .fpk"; exit 1; }
+          for p in "${pkgs[@]}"; do
+            echo "产物：$p ($(du -h "$p" | cut -f1))"
+          done
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: maa-fnos-fpk
+          path: fnos-app/*.fpk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 汇总
+        if: always()
+        run: |
+          {
+            echo "## build-fpk 结果"
+            echo ""
+            echo "- 触发：\`${{ github.ref }}\` / \`${{ github.event_name }}\`"
+            echo "- 核心版本：\`$(grep -E '^MAA_CORE_VERSION=' versions.env | cut -d= -f2)\`"
+            echo "- 结论：\`${{ job.status }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

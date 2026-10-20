@@ -1,0 +1,57 @@
+# ═══════════════════════════════════════════════════════════════════
+# 单仓布局说明（误改这一行会静默丢掉整个 Web 前端）
+#   合并前 MAA-FnOS-main/.gitignore 有一条 `MAA-WEB-CONTROL-master/`，
+#   那条是为了「同时存在两个独立仓库」写的。单仓后该目录就在仓库根下、
+#   是 Dockerfile COPY 的目标，**必须进仓库** —— 所以这里绝不能排除它。
+# ═══════════════════════════════════════════════════════════════════
+
+# ─── 构建输入：体积大 / 可再生成，绝不入库 ──────────────────────────
+# MAA 官方源码树：只作为阅读/对照用的外部依赖，不是本项目的产物。
+# 体积巨大（含壁纸、图标等资源）且不带独立许可证声明，**不进仓库**。
+/MaaAssistantArknights-dev-v2/
+# MAA 官方 Linux 包（几百 MB，超 GitHub 单文件 100MB 硬限）。由
+# deploy/fetch-maa-core.sh 在构建时按 versions.env 钉死的版本下载并校验 SHA256。
+/maa-linux.tar.gz
+*.tar.gz
+!fnos-app/app/*.tar.gz
+
+# ─── 构建产物 ─────────────────────────────────────────────────────
+*.fpk
+fnos-app/app/maa-image.tar
+fnos-app/app/maa-image.tar.gz
+fnos-app/app/maa-image.id
+# build.sh 每次构建用 mktemp -d 新建的上下文目录（按理应在 $MAA_BUILD_WORK，
+# 这里兜一层：万一有人把它指到仓库内，也不会把上下文提交进去）
+/build-ctx/
+/build-ctx.*
+
+# ─── Web 前端的运行期数据（MAA-WEB-CONTROL 会在这里生成配置/日志）──
+# 注意只排除 MAA-WEB-CONTROL-master/ 内部的东西，不排除目录本身。
+MAA-WEB-CONTROL-master/data/
+MAA-WEB-CONTROL-master/.venv/
+MAA-WEB-CONTROL-master/.pytest_cache/
+MAA-WEB-CONTROL-master/.mypy_cache/
+MAA-WEB-CONTROL-master/*.egg-info/
+
+# ─── 飞牛侧运行期数据 ─────────────────────────────────────────────
+maa-data/
+*.log
+
+# ─── Python ──────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# ─── 本地调试 / 凭据（绝不要提交）──────────────────────────────────
+tools/local/
+*.pem
+.env
+.env.*
+!.env.example
+
+# ─── 编辑器 / 系统 ────────────────────────────────────────────────
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

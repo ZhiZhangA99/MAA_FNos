@@ -1,0 +1,16 @@
+appname               = maa-fnos
+version               = 1.0.11
+display_name          = MAA
+desc                  = 基于 MaaAssistantArknights 官方核心的网页控制台，在浏览器中配置任务、查看日志、定时收菜
+platform              = x86
+source                = thirdparty
+maintainer            = danyi
+maintainer_url        = https://github.com/mydanyi
+distributor           = danyi
+distributor_url       = https://space.bilibili.com/258786
+desktop_uidir         = ui
+desktop_applaunchname = maa-fnos.Application
+ctl_stop              = true
+os_min_version        = 1.1.3100
+checkport             = false
+changelog             = 1.0.11: 支持导入自定义基建排班表、修正文件路径并随应用数据持久保存；同步官方关卡任务增量，兼容空增量; 1.0.10: 许可证改为 AGPL-3.0 + 附加条款（禁止商业使用、修改版须同样开源），许可全文随包分发; 1.0.9: 接入飞牛统一网关：服务改为监听 unix socket，不再对外暴露端口，桌面入口从直连地址改为网关内嵌（鉴权由飞牛网关负责）; 1.0.8: 默认触控模式改为 MaaTouch（ChromeOS 版 redroid 没有虚拟触摸设备，Minitouch 装完就连不上），「测试截图」在未连接时自动用当前配置重连、失败时报出原因；1.0.7: 应用标识、容器名、镜像名、数据目录统一改名 maa-fnos（原 maa-web 系列名称仅指代上游前端项目，与应用实际内容不符）；1.0.6: 修复 redroid 状态代理升级不生效（启动探活把 403 误判成「已就绪」，旧进程永不被替换），容器名改为按 ADB 端口反查、不再靠猜名字；1.0.5: 修复停应用时任务链被硬切断、redroid 状态查询对不上容器名、adb 僵尸进程堆积、容器崩溃后不自愈且界面假报「运行中」；1.0.4: 修复卸载重装后镜像指纹丢失、导致新镜像不被导入的问题；1.0.3: 容器名改为 maa-web，升级时自动清理旧容器；1.0.2: 修复升级时旧镜像阻挡新镜像的问题（改用镜像指纹比对）；1.0.1: 新增 redroid 状态查询代理、补全多尺寸桌面图标；1.0.0: 首个版本

@@ -1,0 +1,24 @@
+[project]
+name = "maa-web-control"
+version = "0.1.0"
+description = "LAN web console for orchestrating MaaAssistantArknights tasks."
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "LICENSE.spdx"]
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "Pillow>=10.3",
+]
+
+[project.optional-dependencies]
+test = [
+    "httpx>=0.27",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
